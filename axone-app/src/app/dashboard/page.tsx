@@ -4,13 +4,16 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { useAccount } from 'wagmi';
+import { useAccount, useChainId, useSwitchChain } from 'wagmi';
 import Footer from '@/components/Footer';
 import { Index, getRiskColor, getRiskBgColor } from '@/types/index';
 import StateraLayersIcon from '../../icons/StateraLayersIcon';
 import { useStrategies } from '@/hooks/useStrategies';
 import { useStrategyData } from '@/hooks/useStrategyData';
 import { useVaultActions } from '@/hooks/useVaultActions';
+import { useWithdrawFeePreview } from '@/hooks/useWithdrawFeePreview';
+import { useStrategyApy } from '@/hooks/useStrategyApy';
+import { formatUsd, formatBps } from '@/lib/format';
 import { usePoints } from '@/hooks/usePoints';
 import { useRanking } from '@/hooks/useRanking';
 
@@ -193,10 +196,21 @@ function getMissingConfig(strategy: Index): string[] {
 // Composant pour afficher une stratégie avec ses données
 function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; showWithdraw?: boolean }) {
   const { data, isLoading, isConfigured, address, isError, error } = useStrategyData(strategy);
-  const { deposit, withdraw, isPending, isConfirming, isSuccess, error: vaultError } = useVaultActions(strategy);
+  const { deposit, withdraw, isPending, isConfirming, isSuccess } = useVaultActions(strategy);
   const [depositAmount, setDepositAmount] = useState('');
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  
+  // Hooks pour le réseau et le simulateur de frais
+  const chainId = useChainId();
+  const { switchChain } = useSwitchChain();
+  const { setAmountUsdStr, amountUsdStr, result: feeResult, isLoading: isFeeLoading } = useWithdrawFeePreview(strategy);
+  const { apy: estimatedApy } = useStrategyApy(strategy);
+  
+  // Chain ID attendu pour HyperEVM Testnet
+  const EXPECTED_CHAIN_ID = 998;
+  const isCorrectChain = chainId === EXPECTED_CHAIN_ID;
   
   // Vérifier les éléments manquants
   const missingConfig = getMissingConfig(strategy);
@@ -214,6 +228,40 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
   // Part de l'utilisateur (ratio shares / totalSupply)
   const userShare = data?.userShare || 0;
 
+  // Vérifier le réseau quand un montant est entré
+  useEffect(() => {
+    const amount = depositAmount?.trim();
+    if (amount && !isNaN(parseFloat(amount)) && parseFloat(amount) > 0) {
+      if (address && !isCorrectChain) {
+        setErrorMessage('Wrong Network - Please switch to HyperEVM Testnet (Chain ID: 998)');
+      } else if (address && isCorrectChain) {
+        // Effacer l'erreur de réseau si le réseau est correct
+        setErrorMessage((prev) => {
+          if (prev === 'Wrong Network - Please switch to HyperEVM Testnet (Chain ID: 998)') {
+            return null;
+          }
+          return prev;
+        });
+      } else if (!address) {
+        // Si pas connecté, ne pas afficher d'erreur de réseau
+        setErrorMessage((prev) => {
+          if (prev === 'Wrong Network - Please switch to HyperEVM Testnet (Chain ID: 998)') {
+            return null;
+          }
+          return prev;
+        });
+      }
+    } else if (!amount || amount === '') {
+      // Effacer l'erreur de réseau si le champ est vide
+      setErrorMessage((prev) => {
+        if (prev === 'Wrong Network - Please switch to HyperEVM Testnet (Chain ID: 998)') {
+          return null;
+        }
+        return prev;
+      });
+    }
+  }, [depositAmount, address, isCorrectChain]);
+
   // Gérer le dépôt
   const handleDeposit = async () => {
     if (!depositAmount || parseFloat(depositAmount) <= 0) {
@@ -223,6 +271,11 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
 
     if (!address) {
       setErrorMessage('Please connect your wallet');
+      return;
+    }
+
+    if (!isCorrectChain) {
+      setErrorMessage('Wrong Network - Please switch to HyperEVM Testnet (Chain ID: 998)');
       return;
     }
 
@@ -242,8 +295,9 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
       // HYPE natif utilise 18 décimales
       await deposit(depositAmount, 18);
       setDepositAmount(''); // Reset après succès
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to deposit');
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to deposit';
+      setErrorMessage(errorMessage);
     }
   };
 
@@ -275,8 +329,9 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
       const vaultDecimals = data?.vaultDecimals || 18;
       await withdraw(withdrawAmount, vaultDecimals);
       setWithdrawAmount(''); // Reset après succès
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to withdraw');
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to withdraw';
+      setErrorMessage(errorMessage);
     }
   };
 
@@ -309,7 +364,11 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
         {/* Header avec Token Allocation et APY */}
         <div className="flex items-center justify-between mb-3">
           <h5 className="text-white font-semibold">Token Allocation</h5>
-          <h5 className="text-white font-semibold">APY: {strategy.apy !== undefined ? `${strategy.apy}%` : '-'}</h5>
+          <h5 className="text-white font-semibold">
+            APY: {estimatedApy !== null && !isNaN(estimatedApy) && isFinite(estimatedApy)
+              ? `${estimatedApy.toFixed(2)}%` 
+              : '-'}
+          </h5>
         </div>
         
         {/* Liste des tokens */}
@@ -339,6 +398,10 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
             ))}
           </ul>
           <p className="text-red-300 text-xs mt-2">Please configure these addresses in the admin page.</p>
+          <p className="text-yellow-300 text-xs mt-1">Current addresses:</p>
+          <p className="text-yellow-300 text-xs">Vault: {strategy.vaultAddress || 'Not set'}</p>
+          <p className="text-yellow-300 text-xs">Handler: {strategy.handlerAddress || 'Not set'}</p>
+          <p className="text-yellow-300 text-xs">L1Read: {strategy.l1ReadAddress || 'Not set'}</p>
         </div>
       )}
       
@@ -356,16 +419,17 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
         </div>
       )}
       
-      {address && isConfigured && !isLoading && data && (
-        <div className="mb-4 p-3 bg-blue-900/20 border border-blue-600/30 rounded-lg">
-          <p className="text-blue-400 text-xs mb-1">Debug Info:</p>
-          <p className="text-blue-300 text-xs">Vault Total Supply: {data.vaultTotalSupply}</p>
-          <p className="text-blue-300 text-xs">Vault Shares: {data.vaultShares}</p>
-          <p className="text-blue-300 text-xs">PPS: {data.pps}</p>
-          <p className="text-blue-300 text-xs">NAV USD: {data.navUsd1e18}</p>
-          <p className="text-blue-300 text-xs">Total HYPE Deposited: {data.totalHypeDeposited}</p>
-          <p className="text-blue-300 text-xs">User Deposits HYPE: {data.userDepositsHype}</p>
-          <p className="text-blue-300 text-xs">User Share: {data.userShare}</p>
+      {/* Network verification */}
+      {address && !isCorrectChain && (
+        <div className="mb-4 p-3 bg-yellow-900/20 border border-yellow-600/30 rounded-lg">
+          <p className="text-yellow-400 text-sm font-semibold mb-2">Wrong Network</p>
+          <p className="text-yellow-300 text-xs mb-2">Please switch to HyperEVM Testnet (Chain ID: 998)</p>
+          <button
+            onClick={() => switchChain({ chainId: EXPECTED_CHAIN_ID })}
+            className="px-3 py-1.5 bg-yellow-600 text-black font-semibold rounded text-xs hover:bg-yellow-700 transition-colors"
+          >
+            Switch to HyperEVM Testnet
+          </button>
         </div>
       )}
       
@@ -386,11 +450,20 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
             </span>
           </div>
           <div className="flex justify-between items-center">
-            <span className="text-gray-400 text-sm">Your share in this strategy</span>
+            <span className="text-gray-400 text-sm">Your shares in this strategy</span>
             <span className="text-gray-400 font-bold">
-              {isLoading ? '...' : `${(userShare * 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}%`}
+              {isLoading ? '...' : `${parseFloat(data?.vaultShares || '0').toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`}
             </span>
           </div>
+          {/* PPS Display */}
+          {address && isConfigured && !isLoading && data && (
+            <div className="mt-2 flex justify-between items-center">
+              <span className="text-gray-400 text-sm">Price Per Share (PPS)</span>
+              <span className="text-white font-semibold">
+                {formatUsd(data.ppsUsd, 4)}
+              </span>
+            </div>
+          )}
         </div>
         
         <div className="flex items-center justify-between mb-2">
@@ -402,8 +475,23 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
           </span>
         </div>
         {errorMessage && (
-          <div className="mb-2 p-2 bg-red-900/20 border border-red-500/50 rounded text-red-400 text-xs">
-            {errorMessage}
+          <div className={`mb-2 p-3 rounded text-xs font-semibold ${
+            errorMessage.includes('Wrong Network') 
+              ? 'bg-red-600/90 border-2 border-red-500 text-white' 
+              : 'bg-red-900/20 border border-red-500/50 text-red-400'
+          }`}>
+            <div className="flex items-center gap-2">
+              {errorMessage.includes('Wrong Network') && <span>⚠️</span>}
+              <span>{errorMessage}</span>
+              {errorMessage.includes('Wrong Network') && address && (
+                <button
+                  onClick={() => switchChain({ chainId: EXPECTED_CHAIN_ID })}
+                  className="ml-auto px-2 py-1 bg-white text-red-600 font-semibold rounded text-xs hover:bg-gray-100 transition-colors whitespace-nowrap"
+                >
+                  Switch Network
+                </button>
+              )}
+            </div>
           </div>
         )}
         {isSuccess && (
@@ -458,6 +546,76 @@ function StrategyCard({ strategy, showWithdraw = false }: { strategy: Index; sho
             </div>
           </div>
         )}
+        
+        {/* Section Advanced (Oracles et Simulateur de frais) - seulement pour l'onglet Strategy avec dépôts */}
+        {address && isConfigured && !isLoading && data && showWithdraw && (
+          <div className="mt-4">
+            <button
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="w-full flex items-center justify-between p-2 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-800 transition-colors"
+            >
+              <span className="text-gray-400 text-sm font-semibold">Advanced</span>
+              <span className="text-gray-500 text-xs">{showAdvanced ? '▼' : '▶'}</span>
+            </button>
+            
+            {showAdvanced && (
+              <div className="mt-2 p-3 bg-gray-800/30 border border-gray-700 rounded-lg space-y-4">
+                {/* Oracle Prices */}
+                <div>
+                  <p className="text-gray-400 text-xs font-semibold mb-2">Oracle Prices</p>
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center">
+                      <span className="text-gray-500 text-xs">HYPE (oracle)</span>
+                      <span className="text-white text-sm font-mono">
+                        {formatUsd(data.oracleHypeUsd, 4)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-gray-500 text-xs">BTC (oracle)</span>
+                      <span className="text-white text-sm font-mono">
+                        {formatUsd(data.oracleBtcUsd, 2)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Withdraw Fee Simulator */}
+                {showWithdraw && (
+                  <div className="pt-3 border-t border-gray-700">
+                    <p className="text-gray-400 text-xs font-semibold mb-2">Withdraw Fee Simulator</p>
+                    <div className="space-y-2">
+                      <input
+                        type="number"
+                        placeholder="Amount to withdraw (USD)"
+                        value={amountUsdStr}
+                        onChange={(e) => setAmountUsdStr(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded-lg text-white text-sm focus:border-[#fab062] focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                        min="0"
+                        step="0.01"
+                      />
+                      {feeResult.bps !== undefined && amountUsdStr && parseFloat(amountUsdStr) > 0 && (
+                        <div className="p-2 bg-gray-900/50 rounded text-xs">
+                          <span className="text-gray-400">Estimated withdraw fee: </span>
+                          <span className="text-white font-semibold">
+                            {formatUsd((parseFloat(amountUsdStr) * feeResult.bps) / 10000, 2)}
+                          </span>
+                        </div>
+                      )}
+                      {feeResult.error && (
+                        <div className="p-2 bg-red-900/20 border border-red-600/30 rounded text-red-400 text-xs">
+                          Error: {feeResult.error.message}
+                        </div>
+                      )}
+                      {isFeeLoading && (
+                        <div className="text-gray-500 text-xs">Loading fee...</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -468,6 +626,13 @@ export default function DashboardPage() {
   const [activePointsTab, setActivePointsTab] = useState('Points');
   const { strategies, loading } = useStrategies();
   const [activePage, setActivePage] = useState('dashboard');
+  
+  // Vérification du réseau au niveau de la page
+  const { address } = useAccount();
+  const chainId = useChainId();
+  const { switchChain } = useSwitchChain();
+  const EXPECTED_CHAIN_ID = 998;
+  const isCorrectChain = chainId === EXPECTED_CHAIN_ID;
   
   // États pour la recherche et le filtrage
   const [searchQuery, setSearchQuery] = useState('');
@@ -574,8 +739,25 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen bg-black">
       {/* Header avec bouton Connect Wallet */}
-      <header className="fixed top-0 left-0 right-0 z-[9999] bg-black/50 backdrop-blur-md border-b border-gray-800">
-        <div className="flex items-center justify-between px-4 sm:px-8 md:px-36 lg:px-48 py-4">
+      <header className="fixed left-0 right-0 top-0 z-[9999] bg-black/50 backdrop-blur-md border-b border-gray-800">
+        {/* Bandeau Wrong Network intégré dans le header */}
+        {address && !isCorrectChain && (
+          <div className="bg-red-600 text-white text-center py-3 px-4 text-sm font-semibold shadow-lg border-b-2 border-red-700">
+            <div className="flex items-center justify-center gap-2 sm:gap-3 flex-wrap">
+              <span className="flex items-center gap-2">
+                <span className="text-lg">⚠️</span>
+                <span>Wrong Network - Please switch to HyperEVM Testnet (Chain ID: 998)</span>
+              </span>
+              <button
+                onClick={() => switchChain({ chainId: EXPECTED_CHAIN_ID })}
+                className="px-4 py-1.5 bg-white text-red-600 font-semibold rounded text-xs hover:bg-gray-100 transition-colors whitespace-nowrap shadow-md"
+              >
+                Switch Network
+              </button>
+            </div>
+          </div>
+        )}
+        <div className={`flex items-center justify-between px-4 sm:px-8 md:px-36 lg:px-48 py-4 ${address && !isCorrectChain ? '' : ''}`}>
           {/* Logo et nom */}
           <Link href="/" className="flex items-center gap-3 sm:gap-4">
             <Image
@@ -623,9 +805,9 @@ export default function DashboardPage() {
         </div>
       </header>
       
-      <main className="pt-[60px] md:pt-[80px] flex">
+      <main className={`flex ${address && !isCorrectChain ? 'pt-[104px] md:pt-[124px]' : 'pt-[60px] md:pt-[80px]'}`}>
         {/* Sidebar Navigation */}
-        <aside className="fixed left-0 top-[60px] h-[calc(100vh-600px)] w-64 bg-black overflow-y-auto z-[9998] pb-20">
+        <aside className={`fixed left-0 w-64 bg-black overflow-y-auto z-[9998] pb-20 ${address && !isCorrectChain ? 'top-[104px] h-[calc(100vh-104px)]' : 'top-[60px] h-[calc(100vh-60px)]'}`}>
           <div className="p-6 space-y-2">
             <button
               onClick={() => setActivePage('dashboard')}
